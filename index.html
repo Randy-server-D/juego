@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Shisekai vs Shiromilla — Demo</title>
+<style>
+  :root{--w:900px;--h:520px}
+  body{display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#111}
+  #gameWrap{width:var(--w);height:var(--h);box-shadow:0 10px 40px rgba(0,0,0,.7);border-radius:10px;overflow:hidden;background:#000}
+  canvas{display:block;background:linear-gradient(#87CEFA,#E6F7FF 60%,#C7E7FF 100%)}
+  .ui{position:absolute;left:20px;top:12px;color:#fff;font-family:Arial,Helvetica,sans-serif;pointer-events:none}
+  .ui .info{background:rgba(0,0,0,.25);padding:6px 10px;border-radius:6px}
+  .hud{position:absolute;right:18px;top:12px;color:#fff;font-family:Arial,Helvetica,sans-serif}
+  .bar{height:14px;background:#222;border-radius:8px;padding:2px;margin-bottom:6px;min-width:220px}
+  .bar .fill{height:100%;border-radius:6px}
+  #controls{position:absolute;left:18px;bottom:14px;color:#fff;font-family:monospace;background:rgba(0,0,0,.25);padding:8px;border-radius:8px}
+  #message{position:absolute;left:50%;top:46%;transform:translate(-50%,-50%);color:#fff;font-family:Georgia,serif;font-size:26px;padding:18px;background:rgba(0,0,0,.45);border-radius:8px;display:none}
+  button{cursor:pointer}
+</style>
+</head>
+<body>
+  <div id="gameWrap">
+    <canvas id="game" width="900" height="520"></canvas>
+    <div class="ui" id="names">
+      <div class="info">Shisekai — Kagetsu (Espada Solar)</div>
+    </div>
+    <div class="hud" id="hud">
+      <div class="bar"><div id="playerHP" class="fill" style="width:100%;background:linear-gradient(90deg,#FFD27A,#FF7A00)"></div></div>
+      <div class="bar" style="min-width:260px"><div id="enemyHP" class="fill" style="width:100%;background:linear-gradient(90deg,#D1D9FF,#5A6CFF)"></div></div>
+    </div>
+    <div id="controls">A / D: mover &nbsp; W: saltar &nbsp; J: ataque &nbsp; K: especial</div>
+    <div id="message"></div>
+  </div>
+
+<script>
+// Juego simple 2D con canvas
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+let keys = {};
+
+// Entidades
+class Entity{
+  constructor(x,y,w,h,color){this.x=x;this.y=y;this.w=w;this.h=h;this.color=color;this.vx=0;this.vy=0;this.onGround=false}
+  rect(){return {x:this.x,y:this.y,w:this.w,h:this.h}};
+}
+
+// Plataformas
+const platforms = [
+  {x:0,y:H-60,w:W,h:60},
+  {x:80,y:H-170,w:220,h:16},
+  {x:420,y:H-230,w:260,h:16},
+  {x:720,y:H-150,w:160,h:16}
+];
+
+// Jugador (Shisekai)
+const player = new Entity(120,H-140,48,64,'#FFDD99');
+player.maxHP = 100; player.hp = 100; player.facing = 1; player.attackCooldown=0; player.specialCooldown=0;
+
+// Enemigo (Shiromilla)
+const enemy = new Entity(700,H-140,50,66,'#DDE2FF');
+enemy.maxHP=120; enemy.hp=120; enemy.facing = -1; enemy.attackTimer=0; enemy.state='idle';
+
+let projectiles = []; // lanza oscura / rayo de luz
+let particles = [];
+
+// Física
+const GRAV = 0.9, FRICTION=0.9;
+
+// Utility
+function rectsOverlap(a,b){return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y}
+
+// Input
+window.addEventListener('keydown', e=>{keys[e.key.toLowerCase()]=true});
+window.addEventListener('keyup', e=>{keys[e.key.toLowerCase()]=false});
+
+// Game loop
+let last = performance.now();
+function loop(t){
+  const dt = Math.min(40, t-last); last = t;
+  update(dt/16);
+  render();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+function update(dt){
+  if(player.hp<=0 || enemy.hp<=0) return;
+  // Player controls
+  player.vx *= FRICTION;
+  if(keys['a']){ player.vx -= 0.9; player.facing = -1; }
+  if(keys['d']){ player.vx += 0.9; player.facing = 1; }
+  if(keys['w'] && player.onGround){ player.vy = -15; player.onGround=false }
+  // Attack J -> melee
+  if(keys['j'] && player.attackCooldown<=0){
+    player.attackCooldown = 18; // frames
+    // hitbox
+    const hb = {x: player.x + (player.facing>0? player.w: -40), y: player.y+10, w:40, h:40};
+    if(rectsOverlap(hb, enemy.rect())){ enemy.hp -= 18; spawnParticles(enemy.x+enemy.w/2, enemy.y+20, 'hit'); }
+  }
+  if(keys['k'] && player.specialCooldown<=0){
+    player.specialCooldown = 140; // special recharge
+    // beam of light
+    projectiles.push({x:player.x+player.w/2,y:player.y+20,vx: player.facing*12,vy:0,owner:'player',type:'light',life:60});
+  }
+  player.attackCooldown = Math.max(0, player.attackCooldown-1);
+  player.specialCooldown = Math.max(0, player.specialCooldown-1);
+
+  // Apply gravity
+  player.vy += GRAV;
+  player.x += player.vx; player.y += player.vy;
+  // collisions with platforms
+  player.onGround=false;
+  for(const p of platforms){
+    if(rectsOverlap(player.rect(),p)){
+      // simple top-only collision
+      if(player.vy > 0 && player.y + player.h - player.vy <= p.y+2){ player.y = p.y - player.h; player.vy = 0; player.onGround=true }
+      else if(player.vy < 0 && player.y >= p.y + p.h -2){ player.y = p.y + p.h; player.vy = 0 }
+      else if(player.x + player.w - player.vx <= p.x){ player.x = p.x - player.w }
+      else if(player.x - player.vx >= p.x + p.w){ player.x = p.x + p.w }
+    }
+  }
+  // Keep inside
+  player.x = Math.max(0, Math.min(W-player.w, player.x));
+
+  // Enemy AI: move toward player; throw spear occasionally
+  enemy.attackTimer -= 1;
+  const dx = player.x - enemy.x;
+  if(Math.abs(dx) > 160){ enemy.vx += dx>0?0.3:-0.3; }
+  else enemy.vx *= 0.8;
+  // occasional jump if blocked
+  if(enemy.onGround && Math.abs(dx) < 90 && Math.random()<0.01){ enemy.vy = -12; enemy.onGround=false }
+  // throw spear
+  if(enemy.attackTimer<=0 && Math.abs(dx) < 420){ enemy.attackTimer = 80 + Math.random()*60; projectiles.push({x:enemy.x, y:enemy.y+20, vx: (dx>0?5:-5), vy: -2, owner:'enemy', type:'spear', life:200}) }
+
+  enemy.vy += GRAV;
+  enemy.x += enemy.vx; enemy.y += enemy.vy;
+  enemy.onGround=false;
+  for(const p of platforms){
+    if(rectsOverlap(enemy.rect(),p)){
+      if(enemy.vy > 0 && enemy.y + enemy.h - enemy.vy <= p.y+2){ enemy.y = p.y - enemy.h; enemy.vy = 0; enemy.onGround=true }
+      else if(enemy.vy < 0 && enemy.y >= p.y + p.h -2){ enemy.y = p.y + p.h; enemy.vy = 0 }
+      else if(enemy.x + enemy.w - enemy.vx <= p.x){ enemy.x = p.x - enemy.w }
+      else if(enemy.x - enemy.vx >= p.x + p.w){ enemy.x = p.x + p.w }
+    }
+  }
+  enemy.x = Math.max(0, Math.min(W-enemy.w, enemy.x));
+
+  // Projectiles
+  for(let i=projectiles.length-1;i>=0;i--){ const pr = projectiles[i]; pr.x += pr.vx; pr.y += pr.vy; pr.vy += 0.18; pr.life--; if(pr.life<=0) projectiles.splice(i,1);
+    // collision with entities
+    if(pr.owner==='player' && rectsOverlap({x:pr.x-6,y:pr.y-6,w:12,h:12}, enemy.rect())){ enemy.hp -= (pr.type==='light'?28:12); spawnParticles(pr.x,pr.y,'light'); projectiles.splice(i,1); }
+    if(pr.owner==='enemy' && rectsOverlap({x:pr.x-6,y:pr.y-6,w:12,h:12}, player.rect())){ player.hp -= (pr.type==='spear'?14:8); spawnParticles(pr.x,pr.y,'dark'); projectiles.splice(i,1); }
+  }
+
+  // Particles update
+  for(let i=particles.length-1;i>=0;i--){ const pa = particles[i]; pa.x+=pa.vx; pa.y+=pa.vy; pa.vy+=0.3; pa.life--; if(pa.life<=0) particles.splice(i,1); }
+
+  // Update HUD
+  document.getElementById('playerHP').style.width = Math.max(0,(player.hp/player.maxHP*100))+'%';
+  document.getElementById('enemyHP').style.width = Math.max(0,(enemy.hp/enemy.maxHP*100))+'%';
+
+  // Check death
+  if(enemy.hp<=0){ showMessage('¡Shiromilla derrotado! Shisekai: venganza consumada.'); }
+  if(player.hp<=0){ showMessage('Has sido derrotado... Shiromilla triunfa.'); }
+}
+
+function spawnParticles(x,y,type){
+  const col = type==='light'? '#FFE07A' : (type==='hit'? '#FF6B6B' : '#8A92FF');
+  for(let i=0;i<10;i++){ particles.push({x:x,y:y,vx:(Math.random()-0.5)*4,vy:(Math.random()-1.5)*-3,life:20+Math.random()*20,color:col}) }
+}
+
+// Render
+function render(){
+  // sky gradient + sun/moon
+  ctx.clearRect(0,0,W,H);
+  // background: sky already via CSS, add distant sun and moon symbolically (sun on left, moon on right)
+  // Sun
+  const sunX = 120, sunY = 90; const moonX = W-120, moonY=100;
+  // sun glow
+  const g1 = ctx.createRadialGradient(sunX,sunY,20,sunX,sunY,120); g1.addColorStop(0,'rgba(255,245,200,0.9)'); g1.addColorStop(1,'rgba(255,200,80,0)'); ctx.fillStyle=g1; ctx.fillRect(0,0,W,H);
+  // moon
+  const g2 = ctx.createRadialGradient(moonX,moonY,10,moonX,moonY,90); g2.addColorStop(0,'rgba(230,235,255,0.9)'); g2.addColorStop(1,'rgba(200,220,255,0)'); ctx.fillStyle=g2; ctx.fillRect(0,0,W,H);
+
+  // Parallax clouds (simple)
+  drawCloud(160,60,1.0); drawCloud(520,40,0.8); drawCloud(340,100,0.6);
+
+  // Platforms
+  for(const p of platforms){ ctx.fillStyle='#3A6A2E'; ctx.fillRect(p.x,p.y,p.w,p.h); ctx.fillStyle='rgba(255,255,255,0.04)'; ctx.fillRect(p.x,p.y,Math.min(p.w,80),p.h); }
+
+  // Decorative ruins / pillars
+  drawRuins(60,H-60-48); drawRuins(760,H-150-60);
+
+  // Projectiles
+  for(const pr of projectiles){ if(pr.type==='light'){ drawLight(pr.x,pr.y) } else if(pr.type==='spear'){ drawSpear(pr.x,pr.y, pr.vx<0) } else { drawProj(pr.x,pr.y) } }
+
+  // Particles
+  for(const pa of particles){ ctx.fillStyle = pa.color; ctx.fillRect(pa.x,pa.y,3,3); }
+
+  // Draw entities
+  drawPlayer(player);
+  drawEnemy(enemy);
+
+  // Weapon effects (glow near characters)
+  // Kagetsu (player) - small flame overlay
+  const flameX = player.x + player.w/2, flameY = player.y + 10; drawFlame(flameX,flameY);
+  // Tsukiren (enemy) - cold blood mist
+  drawColdMist(enemy.x+enemy.w/2, enemy.y+10);
+}
+
+function drawCloud(x,y,scale){ ctx.globalAlpha=0.9; ctx.beginPath(); ctx.ellipse(x,y,60*scale,34*scale,0,0,Math.PI*2); ctx.ellipse(x+40*scale,y+6,48*scale,30*scale,0,0,Math.PI*2); ctx.fillStyle='rgba(255,255,255,0.7)'; ctx.fill(); ctx.globalAlpha=1 }
+function drawRuins(x,y){ ctx.fillStyle='#6B6B6B'; ctx.fillRect(x,y-12,18,48); ctx.fillRect(x+22,y-22,8,58); }
+
+function drawPlayer(p){ // simple body
+  // shadow
+  ctx.fillStyle='rgba(0,0,0,0.18)'; ctx.fillRect(p.x+6,p.y+p.h-6,p.w-12,6);
+  // body
+  ctx.fillStyle=p.color; ctx.fillRect(p.x,p.y,p.w,p.h);
+  // face / eyes
+  ctx.fillStyle='#332'; ctx.fillRect(p.x+10, p.y+12, 8,6); ctx.fillRect(p.x+28, p.y+12,8,6);
+  // sword (Kagetsu) - golden blade when attacking or idle
+  ctx.save(); ctx.translate(p.x + (p.facing>0? p.w+6: -6), p.y+14);
+  ctx.rotate(p.facing>0? -0.15: 0.15);
+  // handle
+  ctx.fillStyle='#5B3B2E'; ctx.fillRect(-4,26,8,12);
+  // blade
+  ctx.fillStyle='rgba(255,200,90,0.95)'; ctx.fillRect(-2,-2,6,36);
+  // flame tip
+  ctx.fillStyle='rgba(255,110,30,0.9)'; ctx.beginPath(); ctx.ellipse(1,36,8,12,0,0,Math.PI*2); ctx.fill();
+  ctx.restore();
+}
+function drawEnemy(e){ ctx.fillStyle=e.color; ctx.fillRect(e.x,e.y,e.w,e.h); // eyes
+  ctx.fillStyle='#2A2A2A'; ctx.fillRect(e.x+12,e.y+14,10,6); ctx.fillRect(e.x+28,e.y+14,10,6);
+  // spear (Tsukiren) held
+  ctx.save(); ctx.translate(e.x + (e.facing>0? e.w+8: -8), e.y+18); ctx.rotate(e.facing>0? -0.25: 0.25);
+  ctx.fillStyle='#3A3A5A'; ctx.fillRect(-3,10,6,36); // pole
+  ctx.fillStyle='rgba(120,80,180,0.95)'; ctx.beginPath(); ctx.moveTo(0,-6); ctx.lineTo(14,10); ctx.lineTo(-14,10); ctx.closePath(); ctx.fill(); ctx.restore(); }
+
+function drawLight(x,y){ ctx.beginPath(); ctx.arc(x,y,10,0,Math.PI*2); const g = ctx.createRadialGradient(x,y,2,x,y,28); g.addColorStop(0,'rgba(255,255,200,0.95)'); g.addColorStop(1,'rgba(255,200,100,0)'); ctx.fillStyle=g; ctx.fill(); }
+function drawSpear(x,y,left){ ctx.save(); ctx.translate(x,y); ctx.rotate(left?0.6:-0.6); ctx.fillStyle='rgba(120,80,180,0.95)'; ctx.fillRect(-8,-2,18,4); ctx.beginPath(); ctx.moveTo(10,0); ctx.lineTo(16,6); ctx.lineTo(16,-6); ctx.closePath(); ctx.fill(); ctx.restore(); }
+function drawFlame(x,y){ const g = ctx.createRadialGradient(x,y,2,x,y,36); g.addColorStop(0,'rgba(255,220,120,0.9)'); g.addColorStop(1,'rgba(255,120,30,0)'); ctx.fillStyle=g; ctx.fillRect(x-18,y-6,36,36); }
+function drawColdMist(x,y){ const g = ctx.createRadialGradient(x,y,2,x,y,40); g.addColorStop(0,'rgba(180,200,255,0.3)'); g.addColorStop(1,'rgba(120,140,200,0)'); ctx.fillStyle=g; ctx.fillRect(x-26,y-6,52,40); }
+
+function showMessage(txt){ const m = document.getElementById('message'); m.innerHTML = txt + '<br><br><button id="restartBtn">Reiniciar</button>'; m.style.display = 'block'; document.getElementById('restartBtn').onclick = restartGame; }
+function restartGame(){ player.hp=player.maxHP; enemy.hp=enemy.maxHP; player.x=120; player.y=H-140; enemy.x=700; enemy.y=H-140; projectiles=[]; particles=[]; document.getElementById('message').style.display='none'; }
+
+// Start positions & small intro effect
+spawnParticles(player.x+20, player.y+10,'light'); spawnParticles(enemy.x+20, enemy.y+10,'dark');
+
+</script>
+</body>
+</html>
